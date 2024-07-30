@@ -1,0 +1,76 @@
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
+public class CrptApi {
+    private final TimeUnit timeUnit;
+    private final int requestLimit;
+    private final AtomicInteger requestCount = new AtomicInteger(0);
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+
+    public CrptApi(TimeUnit timeUnit, int requestLimit) {
+        this.timeUnit = timeUnit;
+        this.requestLimit = requestLimit;
+        startResetTask();
+    }
+
+    private void startResetTask() {
+        long delay = timeUnit.toMillis(1);
+        scheduler.scheduleAtFixedRate(() -> requestCount.set(0), delay, delay, TimeUnit.MILLISECONDS);
+    }
+
+    public void createDocument(Object document, String signature) throws Exception {
+        synchronized (this) {
+            while (requestCount.get() >= requestLimit) {
+                this.wait();
+            }
+            requestCount.incrementAndGet();
+        }
+
+        try {
+            sendCreateDocumentRequest(document, signature);
+        } finally {
+            synchronized (this) {
+                this.notifyAll();
+            }
+        }
+    }
+
+    private void sendCreateDocumentRequest(Object document, String signature) throws Exception {
+        URL url = new URL("https://ismp.crpt.ru/api/v3/lk/documents/create");
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("POST");
+        connection.setRequestProperty("Content-Type", "application/json");
+        connection.setRequestProperty("Signature", signature);
+        connection.setDoOutput(true);
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        String jsonString = objectMapper.writeValueAsString(document);
+
+        try (OutputStream os = connection.getOutputStream()) {
+            byte[] input = jsonString.getBytes("utf-8");
+            os.write(input, 0, input.length);
+        }
+
+        int responseCode = connection.getResponseCode();
+        if (responseCode != HttpURLConnection.HTTP_OK) {
+            throw new RuntimeException("Failed to create document: HTTP error code : " + responseCode);
+        }
+    }
+    
+    public static void main(String[] args) throws Exception {
+        // Example usage
+        CrptApi api = new CrptApi(TimeUnit.SECONDS, 5);
+        ObjectNode document = new ObjectMapper().createObjectNode();
+        document.put("doc_id", "123");
+        document.put("doc_status", "NEW");
+        document.put("doc_type", "LP_INTRODUCE_GOODS");
+        // Set other document properties as needed
+        
+        api.createDocument(document, "your-signature-here");
+    }
+}
